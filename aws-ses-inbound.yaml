@@ -1,0 +1,388 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Receive email for Trooper agents with SES, store the raw MIME in S3, and forward it to LaraSend.
+
+Parameters:
+  LaraSendInboundUrl:
+    Type: String
+    NoEcho: true
+    Description: Full LaraSend inbound webhook URL, including its authentication token.
+  LaraSendSesEventUrl:
+    Type: String
+    NoEcho: true
+    Description: Full LaraSend SES/SNS webhook URL for the platform event router source.
+  ConfigurationSetName:
+    Type: String
+    Default: trooper-marketing
+    Description: SES configuration set attached to every organization source.
+
+Resources:
+  InboundBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      LifecycleConfiguration:
+        Rules:
+          - Id: DeleteProcessedAndAbandonedMessages
+            Status: Enabled
+            ExpirationInDays: 7
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+
+  InboundBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref InboundBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: AllowSesToStoreInboundMail
+            Effect: Allow
+            Principal:
+              Service: ses.amazonaws.com
+            Action: s3:PutObject
+            Resource: !Sub '${InboundBucket.Arn}/raw/*'
+            Condition:
+              StringEquals:
+                AWS:SourceAccount: !Ref AWS::AccountId
+              ArnLike:
+                AWS:SourceArn: !Sub 'arn:${AWS::Partition}:ses:${AWS::Region}:${AWS::AccountId}:receipt-rule-set/*'
+
+  ForwarderRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: ReadAndDeleteInboundMail
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:DeleteObject
+                Resource: !Sub '${InboundBucket.Arn}/raw/*'
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub 'arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:*'
+
+  ForwarderFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Description: Forward SES raw MIME messages from S3 to LaraSend.
+      Runtime: nodejs22.x
+      Handler: index.handler
+      MemorySize: 256
+      Timeout: 30
+      Role: !GetAtt ForwarderRole.Arn
+      Environment:
+        Variables:
+          BUCKET_NAME: !Ref InboundBucket
+          INBOUND_URL: !Ref LaraSendInboundUrl
+      Code:
+        ZipFile: |
+          const https = require('https');
+          const {
+            DeleteObjectCommand,
+            GetObjectCommand,
+            S3Client,
+          } = require('@aws-sdk/client-s3');
+
+          const s3 = new S3Client({});
+
+          const streamToBuffer = async (stream) => {
+            const chunks = [];
+
+            for await (const chunk of stream) {
+              chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+            }
+
+            return Buffer.concat(chunks);
+          };
+
+          const postToLaraSend = async (payload) => new Promise((resolve, reject) => {
+            const target = new URL(process.env.INBOUND_URL);
+            const body = JSON.stringify(payload);
+            const request = https.request(target, {
+              method: 'POST',
+              headers: {
+                'content-type': 'application/json',
+                'content-length': Buffer.byteLength(body),
+              },
+              timeout: 15000,
+            }, (response) => {
+              const chunks = [];
+
+              response.on('data', (chunk) => chunks.push(chunk));
+              response.on('end', () => {
+                if (response.statusCode >= 200 && response.statusCode < 300) {
+                  resolve();
+                  return;
+                }
+
+                reject(new Error(`LaraSend returned HTTP ${response.statusCode}: ${Buffer.concat(chunks).toString('utf8').slice(0, 500)}`));
+              });
+            });
+
+            request.on('error', reject);
+            request.on('timeout', () => request.destroy(new Error('LaraSend request timed out')));
+            request.end(body);
+          });
+
+          exports.handler = async (event) => {
+            for (const record of event.Records || []) {
+              const mail = record.ses?.mail;
+              const receipt = record.ses?.receipt;
+
+              if (!mail?.messageId) {
+                continue;
+              }
+
+              const key = `raw/${mail.messageId}`;
+              const object = await s3.send(new GetObjectCommand({
+                Bucket: process.env.BUCKET_NAME,
+                Key: key,
+              }));
+              const raw = await streamToBuffer(object.Body);
+              const destinations = [
+                ...(receipt?.recipients || []),
+                ...(mail.destination || []),
+              ]
+                .map((address) => String(address).trim().toLowerCase())
+                .filter((address, index, addresses) => (
+                  address.includes('@')
+                  && addresses.indexOf(address) === index
+                ));
+
+              if (destinations.length === 0) {
+                throw new Error(`SES message ${mail.messageId} did not contain an email recipient`);
+              }
+
+              for (const destination of destinations) {
+                await postToLaraSend({
+                  from: mail.source,
+                  to: destination,
+                  raw: raw.toString('base64'),
+                });
+              }
+
+              await s3.send(new DeleteObjectCommand({
+                Bucket: process.env.BUCKET_NAME,
+                Key: key,
+              }));
+            }
+          };
+
+  AllowSesToInvokeForwarder:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref ForwarderFunction
+      Action: lambda:InvokeFunction
+      Principal: ses.amazonaws.com
+      SourceAccount: !Ref AWS::AccountId
+      SourceArn: !Sub 'arn:${AWS::Partition}:ses:${AWS::Region}:${AWS::AccountId}:receipt-rule-set/*'
+
+  ReceiptRuleSet:
+    Type: AWS::SES::ReceiptRuleSet
+    Properties:
+      RuleSetName: trooper-agent-email
+
+  ReceiptRule:
+    Type: AWS::SES::ReceiptRule
+    DependsOn:
+      - AllowSesToInvokeForwarder
+      - InboundBucketPolicy
+    Properties:
+      RuleSetName: !Ref ReceiptRuleSet
+      Rule:
+        Name: forward-agent-email-to-larasend
+        Enabled: true
+        ScanEnabled: true
+        TlsPolicy: Optional
+        Actions:
+          - S3Action:
+              BucketName: !Ref InboundBucket
+              ObjectKeyPrefix: raw/
+          - LambdaAction:
+              FunctionArn: !GetAtt ForwarderFunction.Arn
+              InvocationType: Event
+
+  ReceiptRuleSetActivatorRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: ActivateReceiptRuleSet
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: ses:SetActiveReceiptRuleSet
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub 'arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:*'
+
+  ReceiptRuleSetActivatorFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Description: Make the Trooper SES receipt rule set active after CloudFormation creates it.
+      Runtime: nodejs22.x
+      Handler: index.handler
+      MemorySize: 128
+      Timeout: 30
+      Role: !GetAtt ReceiptRuleSetActivatorRole.Arn
+      Code:
+        ZipFile: |
+          const https = require('https');
+          const {
+            SESClient,
+            SetActiveReceiptRuleSetCommand,
+          } = require('@aws-sdk/client-ses');
+
+          const ses = new SESClient({});
+
+          const respond = async (event, context, status, data = {}) => {
+            const body = JSON.stringify({
+              Status: status,
+              Reason: data.reason || `See CloudWatch Logs: ${context.logStreamName}`,
+              PhysicalResourceId: event.PhysicalResourceId || event.ResourceProperties.RuleSetName,
+              StackId: event.StackId,
+              RequestId: event.RequestId,
+              LogicalResourceId: event.LogicalResourceId,
+              NoEcho: false,
+              Data: data,
+            });
+            const target = new URL(event.ResponseURL);
+
+            await new Promise((resolve, reject) => {
+              const request = https.request(target, {
+                method: 'PUT',
+                headers: {
+                  'content-length': Buffer.byteLength(body),
+                  'content-type': '',
+                },
+              }, (response) => {
+                response.resume();
+                response.on('end', resolve);
+              });
+              request.on('error', reject);
+              request.end(body);
+            });
+          };
+
+          exports.handler = async (event, context) => {
+            try {
+              const input = event.RequestType === 'Delete'
+                ? {}
+                : { RuleSetName: event.ResourceProperties.RuleSetName };
+              await ses.send(new SetActiveReceiptRuleSetCommand(input));
+              await respond(event, context, 'SUCCESS', {
+                activeRuleSet: input.RuleSetName || null,
+              });
+            } catch (error) {
+              await respond(event, context, 'FAILED', {
+                reason: String(error?.message || error).slice(0, 1000),
+              });
+            }
+          };
+
+  ActiveReceiptRuleSet:
+    Type: Custom::ActiveReceiptRuleSet
+    DependsOn:
+      - ReceiptRule
+    Properties:
+      ServiceToken: !GetAtt ReceiptRuleSetActivatorFunction.Arn
+      RuleSetName: !Ref ReceiptRuleSet
+
+  SendingEventTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: trooper-marketing-events
+      SignatureVersion: '2'
+      Subscription:
+        - Protocol: https
+          Endpoint: !Ref LaraSendSesEventUrl
+
+  SendingEventTopicPolicy:
+    Type: AWS::SNS::TopicPolicy
+    Properties:
+      Topics:
+        - !Ref SendingEventTopic
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: AllowSesToPublishSendingEvents
+            Effect: Allow
+            Principal:
+              Service: ses.amazonaws.com
+            Action: sns:Publish
+            Resource: !Ref SendingEventTopic
+            Condition:
+              StringEquals:
+                AWS:SourceAccount: !Ref AWS::AccountId
+
+  SendingConfigurationSet:
+    Type: AWS::SES::ConfigurationSet
+    Properties:
+      Name: !Ref ConfigurationSetName
+
+  SendingEventDestination:
+    Type: AWS::SES::ConfigurationSetEventDestination
+    DependsOn:
+      - SendingEventTopicPolicy
+    Properties:
+      ConfigurationSetName: !Ref SendingConfigurationSet
+      EventDestination:
+        Name: trooper-marketing-sns
+        Enabled: true
+        MatchingEventTypes:
+          - SEND
+          - REJECT
+          - BOUNCE
+          - COMPLAINT
+          - DELIVERY
+          - OPEN
+          - CLICK
+          - RENDERING_FAILURE
+          - DELIVERY_DELAY
+          - SUBSCRIPTION
+        SnsDestination:
+          TopicARN: !Ref SendingEventTopic
+
+Outputs:
+  InboundBucketName:
+    Value: !Ref InboundBucket
+  ForwarderFunctionName:
+    Value: !Ref ForwarderFunction
+  ReceiptRuleSetName:
+    Value: !Ref ReceiptRuleSet
+  ConfigurationSetName:
+    Value: !Ref SendingConfigurationSet
+  SendingEventTopicArn:
+    Value: !Ref SendingEventTopic

@@ -102,6 +102,7 @@ class AdminProvisionController extends Controller
             'aws_access_key_id' => config('larasend.platform.aws_access_key_id'),
             'aws_secret_access_key' => config('larasend.platform.aws_secret_access_key'),
             'ses_region' => config('larasend.platform.ses_region'),
+            'ses_configuration_set' => config('larasend.platform.ses_configuration_set'),
         ], fn ($value) => $value !== null && $value !== ''))->save();
 
         // The shared platform domain is verified by fiat: it was verified once
@@ -191,6 +192,9 @@ class AdminProvisionController extends Controller
             'router_project' => $router?->project?->slug,
             'router_inbound_url' => $router
                 ? route('webhooks.inbound.cloudflare', ['token' => $router->webhook_token])
+                : null,
+            'router_ses_webhook_url' => $router
+                ? route('webhooks.ses', ['token' => $router->webhook_token])
                 : null,
             'platform_domain' => $platformDomain ?: null,
             'provider' => (string) config('larasend.platform.provider', 'cloudflare'),

@@ -7,6 +7,7 @@ use App\Jobs\RecheckPendingDomains;
 use App\Models\Project;
 use App\Models\Source;
 use App\Models\Workspace;
+use App\Services\DnsRecordVerifier;
 use App\Services\Providers\DomainOnboardingException;
 use App\Services\Providers\EmailProviderFactory;
 use Illuminate\Http\JsonResponse;
@@ -25,7 +26,10 @@ use RuntimeException;
  */
 class AdminDomainController extends Controller
 {
-    public function __construct(private EmailProviderFactory $providers) {}
+    public function __construct(
+        private EmailProviderFactory $providers,
+        private DnsRecordVerifier $dnsVerifier,
+    ) {}
 
     public function store(Request $request, string $slug): JsonResponse
     {
@@ -44,6 +48,19 @@ class AdminDomainController extends Controller
         }
 
         $domainName = Str::lower(trim($validated['domain']));
+        $claimedByAnotherProject = Project::query()
+            ->whereKeyNot($project->id)
+            ->whereHas('domains', fn ($query) => $query->where('domain', $domainName))
+            ->exists();
+        $platformDomain = Str::lower((string) config('larasend.platform.mail_domain'));
+
+        if ($domainName !== $platformDomain && $claimedByAnotherProject) {
+            return response()->json([
+                'message' => 'This domain is already registered to another organization.',
+                'code' => 'domain_conflict',
+            ], 409);
+        }
+
         $warning = null;
 
         try {
@@ -69,6 +86,7 @@ class AdminDomainController extends Controller
         return response()->json([
             'domain' => $domain->domain,
             'status' => $domain->status,
+            'provider' => $source->provider->value,
             'dns_records' => $domain->dns_records,
             'warning' => $warning,
         ], 201);
@@ -89,6 +107,32 @@ class AdminDomainController extends Controller
         return response()->json([
             'domain' => $domain->domain,
             'status' => $domain->status,
+            'provider' => $project->sources()->where('environment', 'prod')->first()?->provider?->value,
+            'dns_records' => $domain->dns_records,
+            'verified_at' => $domain->verified_at,
+            'inbound_enabled_at' => $domain->inbound_enabled_at,
+        ]);
+    }
+
+    public function verify(Request $request, string $slug, string $domainName): JsonResponse
+    {
+        $project = $this->projectOr404($slug);
+        if ($project instanceof JsonResponse) {
+            return $project;
+        }
+
+        $domain = $project->domains()->where('domain', Str::lower(trim($domainName)))->first();
+        if (! $domain) {
+            return response()->json(['message' => 'Unknown domain.'], 404);
+        }
+
+        $this->dnsVerifier->recheck($domain);
+        $domain->refresh();
+
+        return response()->json([
+            'domain' => $domain->domain,
+            'status' => $domain->status,
+            'provider' => $project->sources()->where('environment', 'prod')->first()?->provider?->value,
             'dns_records' => $domain->dns_records,
             'verified_at' => $domain->verified_at,
             'inbound_enabled_at' => $domain->inbound_enabled_at,
@@ -111,6 +155,13 @@ class AdminDomainController extends Controller
         $domain = $project->domains()->where('domain', Str::lower(trim($domainName)))->first();
         if (! $domain) {
             return response()->json(['message' => 'Unknown domain.'], 404);
+        }
+
+        if (! in_array($domain->status, ['verified', 'local'], true)) {
+            return response()->json([
+                'message' => 'Domain DNS must be verified before inbound routing can be enabled.',
+                'code' => 'domain_not_verified',
+            ], 409);
         }
 
         $domain->forceFill(['inbound_enabled_at' => $domain->inbound_enabled_at ?? now()])->save();

@@ -5,6 +5,7 @@ use App\Models\Project;
 use App\Models\Source;
 use App\Models\User;
 use App\Models\Workspace;
+use Illuminate\Support\Facades\Http;
 
 function platformFixture(): Workspace
 {
@@ -167,5 +168,87 @@ it('reports platform health', function () {
         ->assertStatus(200)
         ->assertJsonPath('ok', true)
         ->assertJsonPath('workspace', 'trooper-platform')
-        ->assertJsonPath('router_project', 'platform-router');
+        ->assertJsonPath('router_project', 'platform-router')
+        ->assertJsonPath('router_inbound_url', fn (string $url) => str_contains($url, '/api/webhooks/inbound/cloudflare/'))
+        ->assertJsonPath('router_ses_webhook_url', fn (string $url) => str_contains($url, '/api/webhooks/ses/'));
+});
+
+it('verifies every provider dns record before a custom domain becomes active', function () {
+    $workspace = platformFixture();
+
+    $this->withHeader('Authorization', 'Bearer test-admin-token')
+        ->postJson('/api/admin/orgs', provisionPayload())
+        ->assertCreated();
+
+    $project = $workspace->projects()->where('slug', 'acme')->firstOrFail();
+    $project->domains()->create([
+        'domain' => 'mail.acme.test',
+        'status' => 'pending',
+        'dns_records' => [[
+            'type' => 'TXT',
+            'name' => '_trooper.mail.acme.test',
+            'value' => 'verified-value',
+            'status' => 'pending',
+        ]],
+    ]);
+
+    Http::fake([
+        'https://cloudflare-dns.com/*' => Http::response([
+            'Status' => 0,
+            'Answer' => [[
+                'name' => '_trooper.mail.acme.test',
+                'type' => 16,
+                'data' => '"verified-value"',
+            ]],
+        ]),
+    ]);
+
+    $this->withHeader('Authorization', 'Bearer test-admin-token')
+        ->postJson('/api/admin/projects/acme/domains/mail.acme.test/verify')
+        ->assertSuccessful()
+        ->assertJsonPath('status', 'verified')
+        ->assertJsonPath('provider', 'cloudflare');
+});
+
+it('does not enable inbound routing before provider dns verification', function () {
+    $workspace = platformFixture();
+
+    $this->withHeader('Authorization', 'Bearer test-admin-token')
+        ->postJson('/api/admin/orgs', provisionPayload())
+        ->assertCreated();
+
+    $project = $workspace->projects()->where('slug', 'acme')->firstOrFail();
+    $project->domains()->create([
+        'domain' => 'pending.acme.test',
+        'status' => 'pending',
+        'dns_records' => [],
+    ]);
+
+    $this->withHeader('Authorization', 'Bearer test-admin-token')
+        ->postJson('/api/admin/projects/acme/domains/pending.acme.test/enable-inbound')
+        ->assertConflict()
+        ->assertJsonPath('code', 'domain_not_verified');
+});
+
+it('prevents two organizations from claiming the same custom domain', function () {
+    $workspace = platformFixture();
+
+    $this->withHeader('Authorization', 'Bearer test-admin-token')
+        ->postJson('/api/admin/orgs', provisionPayload())
+        ->assertCreated();
+    $this->withHeader('Authorization', 'Bearer test-admin-token')
+        ->postJson('/api/admin/orgs', provisionPayload(['org_id' => 'org_two', 'org_slug' => 'globex', 'name' => 'Globex']))
+        ->assertCreated();
+
+    $workspace->projects()->where('slug', 'acme')->firstOrFail()->domains()->create([
+        'domain' => 'customer.example',
+        'status' => 'verified',
+        'dns_records' => [],
+        'verified_at' => now(),
+    ]);
+
+    $this->withHeader('Authorization', 'Bearer test-admin-token')
+        ->postJson('/api/admin/projects/globex/domains', ['domain' => 'customer.example'])
+        ->assertConflict()
+        ->assertJsonPath('code', 'domain_conflict');
 });

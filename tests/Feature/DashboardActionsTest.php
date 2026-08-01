@@ -130,7 +130,10 @@ it('configures a ses source and creates domain dns records', function () {
         ->ses_configuration_set->toBe('larasend-prod')
         ->and($project->domains()->where('domain', 'mail.example.com')->first())
         ->not->toBeNull()
-        ->dns_records->toHaveCount(3);
+        ->dns_records->toHaveCount(7)
+        ->and(collect($project->domains()->where('domain', 'mail.example.com')->first()->dns_records)
+            ->where('purpose', 'Inbound agent mail')->first()['value'])
+        ->toBe('inbound-smtp.us-east-1.amazonaws.com');
 });
 
 it('uses existing ses identity details when aws says the domain already exist', function () {
@@ -154,6 +157,7 @@ it('uses existing ses identity details when aws says the domain already exist', 
                 'Tokens' => ['existing123', 'existing456', 'existing789'],
             ],
         ]),
+        'https://email.us-east-1.amazonaws.com/v2/email/identities/savvyagents.ai/mail-from' => Http::response(),
     ]);
 
     $this->actingAs($user)
@@ -163,7 +167,7 @@ it('uses existing ses identity details when aws says the domain already exist', 
     $domain = $project->domains()->where('domain', 'savvyagents.ai')->firstOrFail();
 
     expect($domain->dns_records)
-        ->toHaveCount(3)
+        ->toHaveCount(7)
         ->and($domain->dns_records[0]['value'])->toContain('existing123');
 });
 

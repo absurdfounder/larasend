@@ -25,14 +25,15 @@ class SesEventNormalizer
         $detail = $payload[$eventType] ?? $payload[ucfirst($eventType)] ?? [];
         $recipient = $this->recipient($eventType, $detail, $message);
         $email = $sesMessageId
-            ? Email::query()->where('source_id', $source->id)->where('ses_message_id', $sesMessageId)->first()
+            ? Email::query()->where('ses_message_id', $sesMessageId)->with('source')->first()
             : null;
+        $eventSource = $email?->source ?? $source;
 
         $email?->forceFill(['status' => $this->statusFor($eventType)])->save();
 
         $event = EmailEvent::create([
             'email_id' => $email?->id,
-            'source_id' => $source->id,
+            'source_id' => $eventSource->id,
             'event_type' => $eventType,
             'ses_message_id' => $sesMessageId,
             'recipient' => $recipient,

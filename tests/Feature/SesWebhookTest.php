@@ -130,6 +130,38 @@ it('normalizes ses delivery events', function () {
         ->and($email->events()->where('event_type', 'delivery')->exists())->toBeTrue();
 });
 
+it('routes shared configuration set events to the source that sent the message', function () {
+    [$sendingSource, $email] = sesWebhookFixture();
+    $routerProject = Project::create([
+        'workspace_id' => $email->workspace_id,
+        'name' => 'SES event router',
+        'slug' => 'ses-event-router',
+    ]);
+    $routerSource = Source::create([
+        'project_id' => $routerProject->id,
+        'name' => 'Router',
+        'webhook_token' => 'shared-ses-router-token',
+    ]);
+
+    Http::fake([
+        SES_TEST_SIGNING_CERT_URL => Http::response(sesTestPublicCertificate()),
+    ]);
+
+    $message = [
+        'eventType' => 'Delivery',
+        'mail' => ['messageId' => 'ses-1', 'timestamp' => now()->toIso8601String(), 'destination' => ['maya@example.com']],
+        'delivery' => ['recipients' => ['maya@example.com'], 'timestamp' => now()->toIso8601String()],
+    ];
+
+    $this->postJson(
+        "/api/webhooks/ses/{$routerSource->webhook_token}",
+        sesSignedSnsEnvelope('Notification', ['Message' => json_encode($message)]),
+    )->assertSuccessful();
+
+    expect($email->fresh()->status)->toBe('delivered')
+        ->and($email->events()->where('event_type', 'delivery')->firstOrFail()->source_id)->toBe($sendingSource->id);
+});
+
 it('records suppressions for permanent ses bounces and complaints', function () {
     [$source, $email] = sesWebhookFixture();
 

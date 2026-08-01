@@ -107,19 +107,54 @@ class SesEmailProvider implements EmailProvider
     {
         $identity = $this->sesClient->createEmailIdentity($source, $domain);
 
+        $mailFromDomain = "bounce.{$domain}";
+        $this->sesClient->configureMailFromDomain($source, $domain, $mailFromDomain);
+
         return collect($identity['tokens'])
             ->map(fn (string $token) => [
                 'type' => 'CNAME',
                 'name' => "{$token}._domainkey.{$domain}",
                 'value' => "{$token}.dkim.amazonses.com",
+                'purpose' => 'DKIM signing',
                 'status' => 'pending',
             ])
             ->whenEmpty(fn ($records) => $records->push([
                 'type' => 'TXT',
                 'name' => "_amazonses.{$domain}",
                 'value' => Arr::random(['created-by-larasend-local-mode']),
+                'purpose' => 'Domain verification',
                 'status' => 'ok',
             ]))
+            ->push([
+                'type' => 'MX',
+                'name' => $mailFromDomain,
+                'value' => "feedback-smtp.{$source->ses_region}.amazonses.com",
+                'priority' => 10,
+                'purpose' => 'Custom return-path',
+                'status' => 'pending',
+            ])
+            ->push([
+                'type' => 'TXT',
+                'name' => $mailFromDomain,
+                'value' => 'v=spf1 include:amazonses.com ~all',
+                'purpose' => 'SPF authorization',
+                'status' => 'pending',
+            ])
+            ->push([
+                'type' => 'TXT',
+                'name' => "_dmarc.{$domain}",
+                'value' => 'v=DMARC1; p=none;',
+                'purpose' => 'DMARC policy',
+                'status' => 'pending',
+            ])
+            ->push([
+                'type' => 'MX',
+                'name' => $domain,
+                'value' => "inbound-smtp.{$source->ses_region}.amazonaws.com",
+                'priority' => 10,
+                'purpose' => 'Inbound agent mail',
+                'status' => 'pending',
+            ])
             ->values()
             ->all();
     }

@@ -54,6 +54,7 @@ it('stores onboarding setup, creates a domain, api key, and webhook endpoint', f
                 'Tokens' => ['abc123', 'def456', 'ghi789'],
             ],
         ]),
+        'https://email.us-east-1.amazonaws.com/v2/email/identities/mail.example.com/mail-from' => Http::response(),
     ]);
 
     $user = User::factory()->create();
@@ -94,10 +95,15 @@ it('stores onboarding setup, creates a domain, api key, and webhook endpoint', f
         ->and($source->default_from_email)->toBe('receipts@example.com')
         ->and($source->aws_session_token)->toBe('session-token-example')
         ->and($project->domains()->where('domain', 'mail.example.com')->exists())->toBeTrue()
-        ->and($project->domains()->where('domain', 'mail.example.com')->firstOrFail()->dns_records)->toHaveCount(3)
+        ->and($project->domains()->where('domain', 'mail.example.com')->firstOrFail()->dns_records)->toHaveCount(7)
         ->and($project->domains()->where('domain', 'mail.example.com')->firstOrFail()->dns_records[0]['value'])->toBe('abc123.dkim.amazonses.com')
         ->and($project->apiKeys()->where('name', 'Billing production')->exists())->toBeTrue()
         ->and($project->webhookEndpoints()->where('url', 'https://example.com/hooks/larasend')->exists())->toBeTrue();
+
+    Http::assertSent(fn ($request) => $request->method() === 'PUT'
+        && $request->url() === 'https://email.us-east-1.amazonaws.com/v2/email/identities/mail.example.com/mail-from'
+        && $request->data()['MailFromDomain'] === 'bounce.mail.example.com'
+        && $request->data()['BehaviorOnMxFailure'] === 'REJECT_MESSAGE');
 });
 
 it('saves configure later onboarding and resumes incomplete users in project setup', function () {

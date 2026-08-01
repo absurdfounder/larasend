@@ -69,6 +69,23 @@ class SesV2Client
         ];
     }
 
+    public function configureMailFromDomain(Source $source, string $domain, string $mailFromDomain): void
+    {
+        $encodedDomain = rawurlencode($domain);
+        $target = "https://email.{$source->ses_region}.amazonaws.com/v2/email/identities/{$encodedDomain}/mail-from";
+        $payload = json_encode([
+            'BehaviorOnMxFailure' => 'REJECT_MESSAGE',
+            'MailFromDomain' => $mailFromDomain,
+        ], JSON_THROW_ON_ERROR);
+
+        $headers = $this->signedHeaders($source, 'PUT', $target, $payload);
+        Http::withHeaders($headers)
+            ->timeout(15)
+            ->withBody($payload, 'application/json')
+            ->put($target)
+            ->throw();
+    }
+
     /**
      * @return array<string, mixed>
      */

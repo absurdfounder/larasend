@@ -58,6 +58,11 @@ class InboundAddressRouter
             }
         }
 
+        $routerProjectSlug = Str::lower((string) config('larasend.platform.router_project_slug'));
+        if ($routerProjectSlug !== '' && Str::lower((string) $source->project?->slug) === $routerProjectSlug) {
+            throw new UnknownInboundRecipient($address);
+        }
+
         return $source->project;
     }
 }

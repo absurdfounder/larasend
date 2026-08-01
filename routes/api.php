@@ -36,6 +36,7 @@ Route::middleware(AuthenticateLarasendAdminToken::class)->prefix('admin')->group
     Route::get('inbound/worker', [AdminDomainController::class, 'worker'])->name('api.admin.inbound.worker');
     Route::post('projects/{slug}/domains', [AdminDomainController::class, 'store'])->name('api.admin.domains.store');
     Route::get('projects/{slug}/domains/{domain}', [AdminDomainController::class, 'show'])->name('api.admin.domains.show');
+    Route::post('projects/{slug}/domains/{domain}/verify', [AdminDomainController::class, 'verify'])->name('api.admin.domains.verify');
     Route::post('projects/{slug}/domains/{domain}/enable-inbound', [AdminDomainController::class, 'enableInbound'])->name('api.admin.domains.enable-inbound');
     Route::get('projects/{slug}/inbound-addresses', [AdminInboundAddressController::class, 'index'])->name('api.admin.inbound-addresses.index');
     Route::put('projects/{slug}/inbound-addresses', [AdminInboundAddressController::class, 'upsert'])->name('api.admin.inbound-addresses.upsert');

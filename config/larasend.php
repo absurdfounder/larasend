@@ -55,6 +55,7 @@ return [
         'aws_access_key_id' => env('LARASEND_PLATFORM_AWS_ACCESS_KEY_ID'),
         'aws_secret_access_key' => env('LARASEND_PLATFORM_AWS_SECRET_ACCESS_KEY'),
         'ses_region' => env('LARASEND_PLATFORM_SES_REGION', 'us-east-1'),
+        'ses_configuration_set' => env('LARASEND_PLATFORM_SES_CONFIGURATION_SET'),
     ],
 
 ];

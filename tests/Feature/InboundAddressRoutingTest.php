@@ -104,19 +104,30 @@ it('routes custom-domain mail via the inbound-enabled domain', function () {
     expect(InboundEmail::firstOrFail()->project_id)->toBe($globex->id);
 });
 
-it('falls back to the source project for non-platform domains (stock behavior)', function () {
+it('rejects unowned domains at the multi-tenant platform router', function () {
     [$routerSource] = routingFixture();
 
-    postInbound($routerSource, 'anything@unrelated-single-tenant.test')->assertStatus(202);
+    postInbound($routerSource, 'anything@unrelated-single-tenant.test')
+        ->assertUnprocessable()
+        ->assertJsonPath('code', 'unknown_recipient');
 
-    expect(InboundEmail::firstOrFail()->project_id)->toBe($routerSource->project_id);
+    expect(InboundEmail::count())->toBe(0);
 });
 
-it('keeps stock behavior when no platform domain is configured', function () {
-    [$routerSource] = routingFixture();
+it('keeps stock behavior for a non-router source', function () {
+    [, $acme] = routingFixture();
+    $source = Source::create([
+        'project_id' => $acme->id,
+        'name' => 'Production',
+        'environment' => 'prod',
+        'provider' => 'cloudflare',
+        'cloudflare_api_token' => 'cf-token',
+        'cloudflare_account_id' => 'cf-account',
+        'webhook_token' => 'single-tenant-'.str()->random(10),
+    ]);
     config()->set('larasend.platform.mail_domain', '');
 
-    postInbound($routerSource, 'nobody.unknown@trooper-mail.test')->assertStatus(202);
+    postInbound($source, 'nobody.unknown@trooper-mail.test')->assertStatus(202);
 
-    expect(InboundEmail::firstOrFail()->project_id)->toBe($routerSource->project_id);
+    expect(InboundEmail::firstOrFail()->project_id)->toBe($source->project_id);
 });
