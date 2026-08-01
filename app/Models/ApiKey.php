@@ -22,6 +22,7 @@ class ApiKey extends Model
         'last_used_ip',
         'last_used_user_agent',
         'expires_at',
+        'revoked_at',
     ];
 
     protected function casts(): array
@@ -30,6 +31,7 @@ class ApiKey extends Model
             'scopes' => 'array',
             'last_used_at' => 'datetime',
             'expires_at' => 'datetime',
+            'revoked_at' => 'datetime',
         ];
     }
 

@@ -20,6 +20,7 @@ class Email extends Model
         'environment',
         'status',
         'ses_message_id',
+        'message_id',
         'from_email',
         'from_name',
         'subject',

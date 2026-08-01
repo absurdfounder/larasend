@@ -3,6 +3,7 @@
 namespace App\Http\Controllers\Webhooks;
 
 use App\Enums\SourceProvider;
+use App\Exceptions\UnknownInboundRecipient;
 use App\Http\Controllers\Controller;
 use App\Models\Source;
 use App\Models\WebhookLog;
@@ -60,6 +61,13 @@ class CloudflareInboundController extends Controller
 
         try {
             $inbound = $ingestor->ingest($source, $validated['from'], $validated['to'], $mime);
+        } catch (UnknownInboundRecipient $exception) {
+            $log->forceFill(['status' => 'rejected', 'error' => $exception->getMessage()])->save();
+
+            // 422 tells the Worker to permanently reject (bounce) the message
+            // — retries can never succeed for an unknown address, and the mail
+            // must not fall through into another tenant's project.
+            return response()->json(['message' => 'Unknown recipient.', 'code' => 'unknown_recipient'], 422);
         } catch (Throwable $exception) {
             report($exception);
             $log->forceFill(['status' => 'failed', 'error' => $exception->getMessage()])->save();

@@ -30,6 +30,14 @@ export default {
       }),
     });
 
+    if (response.status === 422) {
+      // Permanent failure: larasend does not accept this recipient (unknown
+      // address on the shared platform domain). Reject so the sender gets a
+      // bounce instead of the message retry-looping forever.
+      message.setReject("recipient unknown");
+      return;
+    }
+
     if (!response.ok) {
       throw new Error(`Larasend inbound endpoint responded ${response.status}`);
     }

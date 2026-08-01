@@ -125,7 +125,10 @@ class ThreadResolver
 
         $threadId ??= Email::query()
             ->where('project_id', $projectId)
-            ->whereIn('ses_message_id', $references)
+            ->where(function ($query) use ($references) {
+                $query->whereIn('ses_message_id', $references)
+                    ->orWhereIn('message_id', $references);
+            })
             ->whereNotNull('thread_id')
             ->value('thread_id');
 

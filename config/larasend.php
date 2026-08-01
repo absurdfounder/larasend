@@ -31,4 +31,30 @@ return [
 
     'show_landing_page' => env('LARASEND_SHOW_LANDING_PAGE', false),
 
+    /*
+    |--------------------------------------------------------------------------
+    | Trooper Platform Admin API
+    |--------------------------------------------------------------------------
+    |
+    | Bearer token for the /api/admin/* provisioning routes used by the
+    | Trooper central server. The admin API returns 503 until this is set.
+    | The platform block describes the shared Trooper mail domain and the
+    | provider credentials cloned into every organization project's source.
+    |
+    */
+
+    'admin_token' => env('LARASEND_ADMIN_TOKEN'),
+
+    'platform' => [
+        'workspace_slug' => env('LARASEND_PLATFORM_WORKSPACE_SLUG', 'trooper-platform'),
+        'router_project_slug' => env('LARASEND_PLATFORM_ROUTER_SLUG', 'platform-router'),
+        'mail_domain' => env('LARASEND_PLATFORM_MAIL_DOMAIN'),
+        'provider' => env('LARASEND_PLATFORM_PROVIDER', 'cloudflare'),
+        'cloudflare_api_token' => env('LARASEND_PLATFORM_CF_API_TOKEN'),
+        'cloudflare_account_id' => env('LARASEND_PLATFORM_CF_ACCOUNT_ID'),
+        'aws_access_key_id' => env('LARASEND_PLATFORM_AWS_ACCESS_KEY_ID'),
+        'aws_secret_access_key' => env('LARASEND_PLATFORM_AWS_SECRET_ACCESS_KEY'),
+        'ses_region' => env('LARASEND_PLATFORM_SES_REGION', 'us-east-1'),
+    ],
+
 ];

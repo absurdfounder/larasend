@@ -22,11 +22,15 @@ class InboundEmailIngestor
     public function __construct(
         private MailMimeParser $parser,
         private ThreadResolver $threads,
+        private InboundAddressRouter $router,
     ) {}
 
     public function ingest(Source $source, string $envelopeFrom, string $envelopeTo, string $mime): InboundEmail
     {
-        $project = $source->project;
+        // Multi-tenant routing: the shared platform zone delivers many orgs'
+        // mail through one source, so the project is resolved per recipient.
+        // Throws UnknownInboundRecipient for unroutable platform addresses.
+        $project = $this->router->resolveProject($source, $envelopeTo);
         $publicId = 'inbound_'.Str::random(24);
 
         $mimePath = "inbound/{$project->id}/{$publicId}.eml";
