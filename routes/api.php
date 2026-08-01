@@ -2,6 +2,7 @@
 
 use App\Http\Controllers\Api\Admin\AdminDomainController;
 use App\Http\Controllers\Api\Admin\AdminInboundAddressController;
+use App\Http\Controllers\Api\Admin\AdminInboundAttachmentController;
 use App\Http\Controllers\Api\Admin\AdminProvisionController;
 use App\Http\Controllers\Api\EmailController;
 use App\Http\Controllers\Api\SuppressionController;
@@ -41,4 +42,7 @@ Route::middleware(AuthenticateLarasendAdminToken::class)->prefix('admin')->group
     Route::get('projects/{slug}/inbound-addresses', [AdminInboundAddressController::class, 'index'])->name('api.admin.inbound-addresses.index');
     Route::put('projects/{slug}/inbound-addresses', [AdminInboundAddressController::class, 'upsert'])->name('api.admin.inbound-addresses.upsert');
     Route::delete('projects/{slug}/inbound-addresses/{address}', [AdminInboundAddressController::class, 'destroy'])->name('api.admin.inbound-addresses.destroy');
+    Route::get('projects/{slug}/inbound/{inboundEmail:public_id}/attachments/{index}', AdminInboundAttachmentController::class)
+        ->whereNumber('index')
+        ->name('api.admin.inbound.attachments.show');
 });

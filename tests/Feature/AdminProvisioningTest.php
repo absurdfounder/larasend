@@ -1,11 +1,13 @@
 <?php
 
 use App\Models\ApiKey;
+use App\Models\InboundEmail;
 use App\Models\Project;
 use App\Models\Source;
 use App\Models\User;
 use App\Models\Workspace;
 use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Facades\Storage;
 
 function platformFixture(): Workspace
 {
@@ -45,6 +47,30 @@ function provisionPayload(array $overrides = []): array
     ], $overrides);
 }
 
+function adminAttachmentMime(): string
+{
+    return implode("\r\n", [
+        'From: Customer <customer@example.test>',
+        'To: jane@acme.test',
+        'Subject: Attachment',
+        'MIME-Version: 1.0',
+        'Content-Type: multipart/mixed; boundary="BOUNDARY"',
+        '',
+        '--BOUNDARY',
+        'Content-Type: text/plain; charset=utf-8',
+        '',
+        'Attached.',
+        '--BOUNDARY',
+        'Content-Type: text/plain; name="brief.txt"',
+        'Content-Disposition: attachment; filename="brief.txt"',
+        'Content-Transfer-Encoding: base64',
+        '',
+        base64_encode('customer brief'),
+        '--BOUNDARY--',
+        '',
+    ]);
+}
+
 it('rejects admin calls without the token', function () {
     platformFixture();
 
@@ -52,6 +78,42 @@ it('rejects admin calls without the token', function () {
     $this->withHeader('Authorization', 'Bearer wrong')
         ->postJson('/api/admin/orgs', provisionPayload())
         ->assertStatus(401);
+});
+
+it('streams inbound attachments only from the requested org project', function () {
+    $workspace = platformFixture();
+    $this->withHeader('Authorization', 'Bearer test-admin-token')
+        ->postJson('/api/admin/orgs', provisionPayload())
+        ->assertCreated();
+    $project = $workspace->projects()->where('slug', 'acme')->firstOrFail();
+    $source = $project->sources()->firstOrFail();
+
+    Storage::fake('local');
+    Storage::disk('local')->put('inbound/acme/message.eml', adminAttachmentMime());
+    $inbound = InboundEmail::query()->create([
+        'public_id' => 'inbound_attachment_test',
+        'workspace_id' => $workspace->id,
+        'project_id' => $project->id,
+        'source_id' => $source->id,
+        'from_email' => 'customer@example.test',
+        'to_email' => 'jane@acme.test',
+        'subject' => 'Attachment',
+        'mime_disk' => 'local',
+        'mime_path' => 'inbound/acme/message.eml',
+        'mime_size' => strlen(adminAttachmentMime()),
+        'received_at' => now(),
+    ]);
+
+    $this->withHeader('Authorization', 'Bearer test-admin-token')
+        ->get("/api/admin/projects/acme/inbound/{$inbound->public_id}/attachments/0")
+        ->assertOk()
+        ->assertHeader('Content-Type', 'text/plain; charset=utf-8')
+        ->assertHeader('X-Content-Type-Options', 'nosniff')
+        ->assertSeeText('customer brief');
+
+    $this->withHeader('Authorization', 'Bearer test-admin-token')
+        ->get("/api/admin/projects/platform-router/inbound/{$inbound->public_id}/attachments/0")
+        ->assertNotFound();
 });
 
 it('disables the admin api when no token is configured', function () {
