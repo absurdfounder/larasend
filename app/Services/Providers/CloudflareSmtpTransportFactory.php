@@ -9,14 +9,16 @@ use Symfony\Component\Mailer\Transport\TransportInterface;
 class CloudflareSmtpTransportFactory
 {
     /**
-     * Cloudflare's authenticated SMTP submission endpoint. The username is
-     * the literal string "api_token"; the password is the API token itself.
+     * Cloudflare authenticated SMTP. Port 465 (implicit TLS) hangs from
+     * Railway/Hetzner and SIGKILLs the queue worker; 587 STARTTLS answers.
      */
     public function create(Source $source): TransportInterface
     {
-        $transport = new EsmtpTransport('smtp.mx.cloudflare.net', 465, tls: true);
+        $transport = new EsmtpTransport('smtp.mx.cloudflare.net', 587, tls: false);
         $transport->setUsername('api_token');
         $transport->setPassword((string) $source->cloudflare_api_token);
+        $stream = $transport->getStream();
+        $stream->setTimeout(12);
 
         return $transport;
     }
