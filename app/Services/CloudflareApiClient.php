@@ -2,11 +2,13 @@
 
 namespace App\Services;
 
+use App\Exceptions\CloudflareEmailSendingException;
 use App\Models\Source;
 use App\Models\Suppression;
 use Illuminate\Http\Client\PendingRequest;
 use Illuminate\Http\Client\Response;
 use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Str;
 use RuntimeException;
 
 class CloudflareApiClient
@@ -14,6 +16,56 @@ class CloudflareApiClient
     public const SUPPRESSION_MAX_DATA_PAGES = 100;
 
     private const SUPPRESSION_PAGE_SIZE = 100;
+
+    /**
+     * @param  array<string, mixed>  $payload
+     * @return array{message_id: string|null, delivered: array<int, string>, queued: array<int, string>, permanent_bounces: array<int, string>, suppressed_recipients: array<int, string>}
+     */
+    public function sendEmail(Source $source, array $payload): array
+    {
+        $response = $this->request($source)->post('/email/sending/send', $payload);
+
+        if (! $response->successful() || $response->json('success') !== true) {
+            throw $this->sendingException($response);
+        }
+
+        $result = $response->json('result');
+
+        if (! is_array($result)) {
+            throw new CloudflareEmailSendingException(
+                'Cloudflare returned an invalid Email Sending response.',
+                retryable: false,
+                providerContext: $this->responseContext($response),
+            );
+        }
+
+        $normalized = [
+            'message_id' => filled($result['message_id'] ?? null)
+                ? trim((string) $result['message_id'], '<>')
+                : null,
+            'delivered' => $this->recipientList($result['delivered'] ?? []),
+            'queued' => $this->recipientList($result['queued'] ?? []),
+            'permanent_bounces' => $this->recipientList($result['permanent_bounces'] ?? []),
+            'suppressed_recipients' => $this->recipientList($result['suppressed_recipients'] ?? []),
+        ];
+
+        if ($normalized['delivered'] === [] && $normalized['queued'] === []) {
+            $reason = $normalized['permanent_bounces'] !== [] || $normalized['suppressed_recipients'] !== []
+                ? 'Cloudflare permanently rejected every recipient.'
+                : 'Cloudflare did not report any delivered or queued recipients.';
+
+            throw new CloudflareEmailSendingException(
+                $reason,
+                retryable: false,
+                providerContext: [
+                    ...$this->responseContext($response),
+                    'result' => $normalized,
+                ],
+            );
+        }
+
+        return $normalized;
+    }
 
     /**
      * @return array{value: int|float|null, unit: string|null}
@@ -401,6 +453,75 @@ class CloudflareApiClient
             ->acceptJson()
             ->connectTimeout(3)
             ->timeout(15);
+    }
+
+    private function sendingException(Response $response): CloudflareEmailSendingException
+    {
+        $errors = collect($response->json('errors') ?? [])
+            ->filter(fn (mixed $error): bool => is_array($error))
+            ->map(fn (array $error): array => [
+                'code' => $error['code'] ?? null,
+                'message' => Str::limit((string) ($error['message'] ?? ''), 500, ''),
+            ])
+            ->values();
+        $codes = $errors->pluck('code');
+        $providerMessage = $errors->pluck('message')->filter()->implode('; ');
+        $retryable = $codes->intersect([10002, 10003, 10004, 10100])->isNotEmpty()
+            || in_array($response->status(), [408, 425, 429], true)
+            || $response->serverError();
+
+        $message = match (true) {
+            $codes->contains(10101), $codes->contains(10103), $response->status() === 401 => 'Cloudflare rejected the Email Sending API token. Check that it is valid and uses a supported token type.',
+            $codes->contains(10102) => 'The Cloudflare API token is missing the "Email Sending: Edit" permission.',
+            $codes->contains(10105) => 'This Cloudflare account is not entitled to Email Sending. It requires the Workers Paid plan and Email Sending enabled.',
+            $codes->contains(10203) => 'Cloudflare has disabled Email Sending for this account or sender domain. Confirm that the exact sender domain is onboarded and enabled.',
+            $retryable => "Cloudflare Email Sending is temporarily unavailable (HTTP {$response->status()}).",
+            $providerMessage !== '' => "Cloudflare rejected the email: {$providerMessage}",
+            default => "Cloudflare Email Sending failed with status {$response->status()}.",
+        };
+
+        return new CloudflareEmailSendingException(
+            $message,
+            $retryable,
+            $this->responseContext($response, $errors->all()),
+        );
+    }
+
+    /**
+     * @param  array<int, array{code: mixed, message: string}>|null  $errors
+     * @return array<string, mixed>
+     */
+    private function responseContext(Response $response, ?array $errors = null): array
+    {
+        $requestId = $response->header('cf-ray') ?: $response->header('x-request-id');
+
+        return array_filter([
+            'http_status' => $response->status(),
+            'request_id' => $requestId,
+            'errors' => $errors ?? collect($response->json('errors') ?? [])
+                ->filter(fn (mixed $error): bool => is_array($error))
+                ->map(fn (array $error): array => [
+                    'code' => $error['code'] ?? null,
+                    'message' => Str::limit((string) ($error['message'] ?? ''), 500, ''),
+                ])
+                ->values()
+                ->all(),
+        ], fn (mixed $value): bool => $value !== null && $value !== [] && $value !== '');
+    }
+
+    /**
+     * @return array<int, string>
+     */
+    private function recipientList(mixed $recipients): array
+    {
+        if (! is_array($recipients)) {
+            return [];
+        }
+
+        return collect($recipients)
+            ->filter(fn (mixed $recipient): bool => is_string($recipient) && $recipient !== '')
+            ->values()
+            ->all();
     }
 
     /**

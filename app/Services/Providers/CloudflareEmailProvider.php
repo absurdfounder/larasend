@@ -5,12 +5,8 @@ namespace App\Services\Providers;
 use App\Enums\SourceProvider;
 use App\Models\Source;
 use App\Services\CloudflareApiClient;
-use App\Services\MimeMessageBuilder;
+use App\Services\CloudflareMessagePayloadBuilder;
 use RuntimeException;
-use Symfony\Component\Mailer\Envelope;
-use Symfony\Component\Mailer\Exception\TransportExceptionInterface;
-use Symfony\Component\Mime\Address;
-use Symfony\Component\Mime\RawMessage;
 use Throwable;
 
 class CloudflareEmailProvider implements EmailProvider
@@ -24,8 +20,7 @@ class CloudflareEmailProvider implements EmailProvider
 
     public function __construct(
         private CloudflareApiClient $apiClient,
-        private CloudflareSmtpTransportFactory $transportFactory,
-        private MimeMessageBuilder $mimeBuilder,
+        private CloudflareMessagePayloadBuilder $payloadBuilder,
     ) {}
 
     public function key(): SourceProvider
@@ -160,77 +155,41 @@ class CloudflareEmailProvider implements EmailProvider
 
     public function sendRawEmail(Source $source, string $mime, array $envelope): array
     {
-        $sender = $this->mimeBuilder->address($envelope['from']);
-        $recipients = array_map(
-            fn (string $recipient): Address => $this->mimeBuilder->address($recipient),
-            $envelope['recipients'],
-        );
-
-        if ($recipients === []) {
+        if ($envelope['recipients'] === []) {
             throw new RuntimeException('Cannot send: the email has no recipients.');
         }
 
-        $transport = $this->transportFactory->create($source);
-
-        try {
-            $sent = $transport->send(new RawMessage($mime), new Envelope($sender, $recipients));
-        } catch (TransportExceptionInterface $exception) {
-            throw $this->mapTransportException($exception, $sender);
-        }
-
-        $transcript = $this->sanitizeSmtpTranscript(trim((string) $sent?->getDebug()));
+        $payload = $this->payloadBuilder->build($mime, $envelope);
+        $result = $this->apiClient->sendEmail($source, $payload);
+        $messageId = $result['message_id'] ?? $this->extractMessageId($mime);
 
         return [
-            'message_id' => $this->extractMessageId($mime),
-            'response' => array_filter([
+            'message_id' => $messageId,
+            'response' => [
                 'provider' => 'cloudflare',
-                'remote_id' => $this->extractRemoteQueueId($transcript),
-                'smtp' => $transcript ?: null,
-            ]),
+                'transport' => 'https_rest',
+                'delivery_state' => $this->deliveryState($result),
+                'remote_id' => $messageId,
+                'delivered' => $result['delivered'],
+                'queued' => $result['queued'],
+                'permanent_bounces' => $result['permanent_bounces'],
+                'suppressed_recipients' => $result['suppressed_recipients'],
+            ],
         ];
     }
 
-    /**
-     * The raw SMTP debug transcript contains the AUTH exchange, whose base64
-     * payloads decode to the literal API token. Redact every client line in
-     * the authentication phase before the transcript is persisted anywhere.
-     */
-    public function sanitizeSmtpTranscript(string $transcript): string
+    /** @param array{delivered: array<int, string>, queued: array<int, string>, permanent_bounces: array<int, string>, suppressed_recipients: array<int, string>} $result */
+    private function deliveryState(array $result): string
     {
-        $sanitized = [];
-        $inAuth = false;
-
-        foreach (preg_split('/\r\n|\n/', $transcript) ?: [] as $line) {
-            if (preg_match('/> AUTH\b.*$/i', $line)) {
-                $inAuth = true;
-                $sanitized[] = preg_replace('/(> AUTH \S+).*$/i', '$1 [redacted]', $line);
-
-                continue;
-            }
-
-            if ($inAuth && str_contains($line, '> ')) {
-                $sanitized[] = preg_replace('/> .*$/', '> [redacted]', $line);
-
-                continue;
-            }
-
-            if ($inAuth && preg_match('/< (235|535|501)/', $line)) {
-                $inAuth = false;
-            }
-
-            $sanitized[] = $line;
+        if ($result['permanent_bounces'] !== [] || $result['suppressed_recipients'] !== []) {
+            return 'partial';
         }
 
-        return implode("\n", $sanitized);
-    }
-
-    private function extractRemoteQueueId(string $transcript): ?string
-    {
-        if (preg_match('/250 2\.0\.0 Ok <([^>]+)>/', $transcript, $matches) === 1) {
-            return $matches[1];
+        if ($result['queued'] !== []) {
+            return 'queued';
         }
 
-        return null;
+        return 'delivered';
     }
 
     public function fetchQuota(Source $source): array
@@ -342,31 +301,6 @@ class CloudflareEmailProvider implements EmailProvider
     public function supportsSuppressionSync(): bool
     {
         return true;
-    }
-
-    private function mapTransportException(TransportExceptionInterface $exception, Address $sender): Throwable
-    {
-        $message = $exception->getMessage();
-
-        if (str_contains($message, '550') && str_contains($message, '5.7.1')) {
-            $domain = substr($sender->getAddress(), (int) strrpos($sender->getAddress(), '@') + 1);
-
-            return new RuntimeException(
-                "Cloudflare rejected the sender address. Add \"{$domain}\" as a sending domain in Larasend (or onboard it for Email Sending in the Cloudflare dashboard), then try again.",
-                previous: $exception,
-            );
-        }
-
-        if (str_contains($message, '535')) {
-            return new RuntimeException(
-                'Cloudflare rejected the API token over SMTP. Check that the token is valid and has the "Email Sending: Edit" permission.',
-                previous: $exception,
-            );
-        }
-
-        // Transient failures keep their original type so the queue's
-        // retry/backoff machinery treats them normally.
-        return $exception;
     }
 
     private function extractMessageId(string $mime): ?string

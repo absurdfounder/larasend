@@ -37,7 +37,7 @@ Larasend is built with Laravel, Inertia, Vue, PostgreSQL, Redis, and Docker.
 
 1. Your Laravel app sends mail through the Larasend Laravel transport or directly through the HTTP API.
 2. Larasend validates the request, stores the MIME payload and metadata, and queues delivery.
-3. The Larasend queue worker sends the raw email through the source's provider — Amazon SES (HTTPS API) or Cloudflare Email Service (authenticated SMTP).
+3. The Larasend queue worker sends the email through the source's provider — Amazon SES or Cloudflare Email Service, both over HTTPS APIs.
 4. SES publishes delivery/bounce/complaint/open/click events back to Larasend through the SES webhook. Cloudflare has no event webhooks: delivery state is recorded at send time and suppressions sync hourly from the Cloudflare account-level list.
 5. Larasend updates the activity dashboard, metrics, suppressions, and webhook deliveries.
 
@@ -120,7 +120,7 @@ Recommended setup:
 
 ## Cloudflare Email Service Setup
 
-Larasend can send through [Cloudflare Email Service](https://developers.cloudflare.com/email-service/) instead of SES. Sending happens over Cloudflare's authenticated SMTP endpoint; quota and suppressions sync over the Cloudflare REST API.
+Larasend can send through [Cloudflare Email Service](https://developers.cloudflare.com/email-service/) instead of SES. Sending, quota checks, and suppression sync all use Cloudflare's HTTPS REST API.
 
 Requirements:
 
@@ -141,7 +141,7 @@ If you prefer a minimal token with only "Email Sending: Edit", onboard the domai
 
 Differences from SES to be aware of:
 
-- Cloudflare has no delivery-event webhooks and no open/click tracking. Delivery state is recorded from the SMTP response at send time.
+- Cloudflare has no delivery-event webhooks and no open/click tracking. Delivery state is recorded from the Email Sending API response at send time.
 - Suppressions (hard bounces, spam complaints) are managed on Cloudflare's account-level list and sync into Larasend hourly. This requires the Laravel scheduler, which the Docker stack runs automatically as the `scheduler` service; for non-Docker installs run `php artisan schedule:work` or add a cron entry calling `schedule:run`.
 - Quota is a daily allowance rather than a rolling 24-hour window.
 
@@ -330,7 +330,7 @@ Please report security issues privately before opening a public issue.
 - Packagist release for the Laravel driver.
 - More provider adapters beyond Amazon SES and Cloudflare Email Service.
 - Cloudflare OAuth as an alternative to pasted API tokens. Deferred because every self-hosted install would first need its own OAuth client registered in the Cloudflare dashboard (redirect URLs are fixed per client), so it adds admin setup before it removes user friction; the token flow needs zero prerequisites.
-- Cloudflare delivery-event polling via the GraphQL Analytics API (late bounces and spam flags after the SMTP accept). Deferred because it needs zone-scoped Analytics Read, per-message ID correlation, and only adds marginal signal — Cloudflare has no open/click tracking either way.
+- Cloudflare delivery-event polling via the GraphQL Analytics API (late bounces and spam flags after API acceptance). Deferred because it needs zone-scoped Analytics Read, per-message ID correlation, and only adds marginal signal — Cloudflare has no open/click tracking either way.
 - CloudFormation quick-create link for one-click SES IAM setup. Deferred because it requires a project-hosted template outside this repository.
 - Deeper per-domain health and deliverability reporting.
 - First-class deploy workflow for updating self-hosted Docker installations.

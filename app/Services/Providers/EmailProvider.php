@@ -28,8 +28,8 @@ interface EmailProvider
     /**
      * Send a fully built raw MIME message. The envelope carries the sender
      * and recipients both flat and grouped by type, because bcc recipients
-     * are never present in the MIME headers: SMTP providers use the flat
-     * list as RCPT TO, SES builds an explicit Destination from the groups.
+     * are never present in the MIME headers: Cloudflare uses the flat list
+     * as its HTTPS envelope, SES builds an explicit Destination from groups.
      *
      * @param  array{from: string, recipients: array<int, string>, to: array<int, string>, cc: array<int, string>, bcc: array<int, string>}  $envelope
      * @return array{message_id: string|null, response: array<string, mixed>}

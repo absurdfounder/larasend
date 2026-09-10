@@ -56,9 +56,9 @@ class EmailSendService
             Storage::disk('local')->put($mimePath, $mime);
             $fromAddress = $this->mimeBuilder->splitAddress($from);
 
-            // Symfony generates the RFC Message-ID at toString() time. Persist
-            // it so external replies thread by reference (ThreadResolver) even
-            // for agent-initiated first emails.
+            // Symfony generates an RFC Message-ID at toString() time. Persist
+            // it for providers that preserve raw MIME; provider-generated IDs
+            // are stored after sending and ThreadResolver checks both values.
             preg_match('/^Message-ID:\s*<([^>]+)>/mi', $mime, $messageIdMatch);
 
             $email = Email::create([

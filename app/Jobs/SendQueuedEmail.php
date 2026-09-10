@@ -3,10 +3,12 @@
 namespace App\Jobs;
 
 use App\Events\EmailActivityUpdated;
+use App\Exceptions\CloudflareEmailSendingException;
 use App\Models\Email;
 use App\Services\Providers\EmailProviderFactory;
 use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Queue\Queueable;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Storage;
 use Throwable;
 
@@ -52,10 +54,29 @@ class SendQueuedEmail implements ShouldQueue
 
             $result = $providers->forSource($email->source)->sendRawEmail($email->source, $mime, $this->envelope($email));
         } catch (Throwable $exception) {
-            // Stay in 'sending' so the queue's remaining attempts get past the
-            // status guard above; failed() marks it failed after the last one.
+            Log::warning('Queued email send attempt failed.', [
+                'email_id' => $email->public_id,
+                'source_id' => $email->source_id,
+                'provider' => $email->source->provider?->value,
+                'attempt' => $this->attempts(),
+                'retryable' => ! $exception instanceof CloudflareEmailSendingException || $exception->retryable,
+                'error' => $exception->getMessage(),
+                'provider_context' => $exception instanceof CloudflareEmailSendingException
+                    ? $exception->providerContext
+                    : [],
+            ]);
+
             EmailActivityUpdated::dispatch($email->fresh());
 
+            if ($exception instanceof CloudflareEmailSendingException && ! $exception->retryable) {
+                $this->recordFailure($email, $exception);
+                $this->fail($exception);
+
+                return;
+            }
+
+            // Stay in 'sending' so the queue's remaining attempts get past the
+            // status guard above; failed() marks it failed after the last one.
             throw $exception;
         }
 
@@ -79,7 +100,7 @@ class SendQueuedEmail implements ShouldQueue
     /**
      * The typed recipient groups matter: Symfony Mime strips the Bcc header
      * from the stored message, so every provider must receive recipients out
-     * of band — SES as an explicit Destination, SMTP in the envelope.
+     * of band — SES as an explicit Destination, Cloudflare in its HTTPS envelope.
      *
      * @return array{from: string, recipients: array<int, string>, to: array<int, string>, cc: array<int, string>, bcc: array<int, string>}
      */
@@ -104,13 +125,42 @@ class SendQueuedEmail implements ShouldQueue
             return;
         }
 
+        $this->recordFailure($email, $exception);
+    }
+
+    private function recordFailure(Email $email, Throwable $exception): void
+    {
+        if ($email->status === 'failed' && $email->events()->where('event_type', 'failed')->exists()) {
+            return;
+        }
+
         $email->forceFill(['status' => 'failed'])->save();
+
+        $payload = ['error' => $exception->getMessage()];
+
+        if ($exception instanceof CloudflareEmailSendingException) {
+            $payload = [
+                ...$payload,
+                'provider' => 'cloudflare',
+                'retryable' => $exception->retryable,
+                'provider_context' => $exception->providerContext,
+            ];
+        }
 
         $email->events()->create([
             'source_id' => $email->source_id,
             'event_type' => 'failed',
-            'payload' => ['error' => $exception->getMessage()],
+            'payload' => $payload,
             'occurred_at' => now(),
+        ]);
+
+        Log::error('Queued email delivery failed.', [
+            'email_id' => $email->public_id,
+            'source_id' => $email->source_id,
+            'error' => $exception->getMessage(),
+            'provider_context' => $exception instanceof CloudflareEmailSendingException
+                ? $exception->providerContext
+                : [],
         ]);
 
         EmailActivityUpdated::dispatch($email->fresh());
